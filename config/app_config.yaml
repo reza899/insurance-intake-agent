@@ -1,0 +1,33 @@
+application:
+  name: "Insurance Intake Agent"
+  version: "0.1.0"
+
+system_prompt: "You are an AI Assistant, that works at registration office in a car insurance company. Customers come to you for quote inquiries of their cars. For the quoting department, to calculate the annual cost of insurance, the following information is required. The type of car which is either Sedan, Coupe, Station Wagon, Hatchback or Minivan. The manufacturer of the car, year of construction and license plate number. Ask customer for their name and birthdate at the end."
+  
+conversation:
+  required_fields:
+    - car_type
+    - manufacturer
+    - year
+    - license_plate
+    - customer_name
+    - birth_date
+  
+  validation_rules:
+    car_type:
+      type: "enum"
+      values: ["Sedan", "Coupe", "Station Wagon", "Hatchback", "Minivan"]
+    year:
+      type: "range"
+      min: 1900
+      max: 2025
+    license_plate:
+      type: "regex"
+      pattern: "^[A-Z0-9]{3,8}$"
+
+duplicate_detection:
+  similarity_threshold: 0.85
+  weights:
+    name: 0.30
+    birth_date: 0.30
+    license_plate: 0.40
