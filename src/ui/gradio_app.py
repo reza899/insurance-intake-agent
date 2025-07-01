@@ -1,7 +1,3 @@
-"""Simple Gradio chat interface for Insurance Intake Agent."""
-
-import os
-import re
 from typing import List
 
 import gradio as gr
@@ -9,15 +5,12 @@ import requests
 
 
 class InsuranceIntakeUI:
-    """Simple Insurance Intake Gradio UI."""
+    """Insurance Intake Gradio UI with agent backend."""
 
     def __init__(self):
-        self.api_base_url = os.getenv("API_BASE_URL", "http://localhost:8000")
-        self.session_data = {
-            "customer_data": {},
-            "car_data": {},
-            "registration_complete": False,
-        }
+        # Use localhost when host is 0.0.0.0 (which is for server binding, not client connections)
+        self.api_base_url = "http://localhost:8000"
+        self.conversation_history = []
 
     def check_api_health(self) -> bool:
         """Check if API is available."""
@@ -28,97 +21,60 @@ class InsuranceIntakeUI:
             return False
 
     def get_agent_response(self, user_message: str) -> str:
-        """Get response from the conversational agent."""
-        self.extract_data_from_message(user_message)
+        """Get response from the agent backend."""
+        try:
+            # Add user message to conversation history
+            self.conversation_history.append({"role": "user", "content": user_message})
 
-        if not self.session_data["customer_data"].get("name"):
-            return (
-                "Hello! I'm here to help you register for car insurance. "
-                "Let's start with your full name."
-            )
+            # Call agent backend
+            payload = {"message": user_message, "conversation_history": self.conversation_history}
 
-        if not self.session_data["customer_data"].get("birth_date"):
-            return (
-                "Thank you! Now, could you please provide your birth date? "
-                "(Format: YYYY-MM-DD)"
-            )
+            response = requests.post(f"{self.api_base_url}/chat", json=payload, timeout=30)
 
-        if not self.session_data["car_data"].get("car_type"):
-            return (
-                "Great! Now let's talk about your car. What type of car do you have? "
-                "(e.g., Sedan, SUV, Hatchback)"
-            )
+            if response.status_code == 200:
+                result = response.json()
+                raw_response = result.get("response", "I'm sorry, I couldn't process that.")
 
-        if not self.session_data["car_data"].get("manufacturer"):
-            return "What's the manufacturer of your car? (e.g., Toyota, Ford, BMW)"
+                # Parse thinking and actual response
+                formatted_response = InsuranceIntakeUI._format_response_with_thinking(raw_response)
 
-        if not self.session_data["car_data"].get("year"):
-            return "What year was your car manufactured?"
+                # Add agent response to conversation history (store the formatted version)
+                self.conversation_history.append({"role": "assistant", "content": formatted_response})
 
-        if not self.session_data["car_data"].get("license_plate"):
-            return "Finally, what's your license plate number?"
+                return formatted_response
+            else:
+                return "I'm having trouble connecting to the system. Please try again."
 
-        if not self.session_data["registration_complete"]:
-            self.session_data["registration_complete"] = True
-            return (
-                "Perfect! I have all the information I need. "
-                "Your car insurance registration is complete!"
-            )
+        except Exception as e:
+            return f"Sorry, there was an error: {str(e)}"
 
-        return (
-            "Your registration has been completed! "
-            "Is there anything else I can help you with?"
-        )
+    @staticmethod
+    def _format_response_with_thinking(raw_response: str) -> str:
+        """Format response to show thinking process in collapsible section."""
+        import re
 
-    def extract_data_from_message(self, user_message: str) -> None:
-        """Extract data from user message (simplified logic)."""
-        message_lower = user_message.lower().strip()
+        # Check if response contains thinking
+        think_match = re.search(r"<think>(.*?)</think>\s*(.*)", raw_response, flags=re.DOTALL)
+        if think_match:
+            thinking_content = think_match.group(1).strip()
+            actual_response = think_match.group(2).strip()
 
-        if (
-            not self.session_data["customer_data"].get("name")
-            and len(user_message.split()) >= 2
-        ):
-            self.session_data["customer_data"]["name"] = user_message.title()
+            # Format with collapsible thinking section
+            formatted = f"""**Agent Response:**
 
-        elif not self.session_data["customer_data"].get("birth_date"):
-            date_pattern = r"\b\d{4}-\d{2}-\d{2}\b"
-            match = re.search(date_pattern, user_message)
-            if match:
-                self.session_data["customer_data"]["birth_date"] = match.group()
+{actual_response}
 
-        elif not self.session_data["car_data"].get("car_type"):
-            car_types = ["sedan", "suv", "hatchback", "coupe", "truck", "van"]
-            for car_type in car_types:
-                if car_type in message_lower:
-                    self.session_data["car_data"]["car_type"] = car_type.title()
-                    break
+<details>
+<summary>🤔 View Agent's Thinking Process</summary>
 
-        elif not self.session_data["car_data"].get("manufacturer"):
-            manufacturers = [
-                "toyota",
-                "ford",
-                "bmw",
-                "honda",
-                "nissan",
-                "chevrolet",
-                "audi",
-                "mercedes",
-            ]
-            for manufacturer in manufacturers:
-                if manufacturer in message_lower:
-                    self.session_data["car_data"]["manufacturer"] = manufacturer.title()
-                    break
-
-        elif not self.session_data["car_data"].get("year"):
-            year_pattern = r"\b(19|20)\d{2}\b"
-            match = re.search(year_pattern, user_message)
-            if match:
-                self.session_data["car_data"]["year"] = int(match.group())
-
-        elif not self.session_data["car_data"].get("license_plate"):
-            cleaned = re.sub(r"[^a-zA-Z0-9]", "", user_message)
-            if len(cleaned) >= 3:
-                self.session_data["car_data"]["license_plate"] = cleaned.upper()
+```
+{thinking_content}
+```
+</details>"""
+            return formatted
+        else:
+            # No thinking found, return as is
+            return raw_response
 
     def chat_function(self, message: str, history: List[List[str]]) -> List[List[str]]:
         """Handle chat interaction."""
@@ -127,80 +83,72 @@ class InsuranceIntakeUI:
         return history
 
     def get_session_info(self) -> str:
-        """Get current session information."""
-        info = "**Collected Information:**\n\n"
+        """Get current session information from agent."""
+        if not self.conversation_history:
+            return "No data collected yet. Start the conversation!"
 
-        if self.session_data["customer_data"]:
-            info += "**Customer Data:**\n"
-            for key, value in self.session_data["customer_data"].items():
-                if value:
-                    info += f"- {key.title()}: {value}\n"
-            info += "\n"
+        # Get latest agent response for session info
+        last_message = self.conversation_history[-1] if self.conversation_history else None
+        if last_message and last_message.get("role") == "assistant":
+            # Simple display of conversation progress
+            return f"**Conversation Progress:**\n\n{len(self.conversation_history)} messages exchanged"
 
-        if self.session_data["car_data"]:
-            info += "**Car Data:**\n"
-            for key, value in self.session_data["car_data"].items():
-                if value:
-                    info += f"- {key.title()}: {value}\n"
-
-        if not self.session_data["customer_data"] and not self.session_data["car_data"]:
-            info += "No data collected yet. Start the conversation!"
-
-        return info
+        return "Conversation in progress..."
 
     def reset_session(self) -> tuple:
-        """Reset the session data."""
-        self.session_data = {
-            "customer_data": {},
-            "car_data": {},
-            "registration_complete": False,
-        }
+        """Reset the conversation history."""
+        self.conversation_history = []
         return [], self.get_session_info()
 
     def launch(self, **kwargs):
         """Launch the Gradio interface."""
-        api_status = self.check_api_health()
-        status_text = (
-            "✅ API is online"
-            if api_status
-            else "⚠️ API is offline - running in demo mode"
-        )
-
         with gr.Blocks(title="Insurance Intake Agent") as interface:
             gr.Markdown("# 🚗 Car Insurance Registration Agent")
-            gr.Markdown(
-                "Welcome! I'll help you register for car insurance "
-                "through a simple conversation."
-            )
-            gr.Markdown(status_text)
+            gr.Markdown("Welcome! I'll help you register for car insurance through a simple conversation.")
+
+            # Dynamic API status component
+            api_status_display = gr.Markdown()
+
+            # Function to update API status
+            def update_api_status():
+                api_status = self.check_api_health()
+                status_text = "✅ API is online" if api_status else "⚠️ API is offline - running in demo mode"
+                return status_text
+
+            # Initial status update
+            interface.load(update_api_status, outputs=api_status_display)
 
             with gr.Row():
                 with gr.Column(scale=2):
                     chatbot = gr.Chatbot(label="Conversation", height=400)
-                    msg = gr.Textbox(
-                        label="Your message", placeholder="Type your message here..."
-                    )
+                    msg = gr.Textbox(label="Your message", placeholder="Type your message here...")
 
                     with gr.Row():
                         submit_btn = gr.Button("Send", variant="primary")
                         clear_btn = gr.Button("Reset Session", variant="secondary")
 
                 with gr.Column(scale=1):
-                    session_info = gr.Markdown(
-                        self.get_session_info(), label="Session Information"
-                    )
+                    session_info = gr.Markdown(self.get_session_info(), label="Session Information")
 
             # Event handlers
             def respond(message, history):
-                new_history = self.chat_function(message, history)
-                return "", new_history, self.get_session_info()
+                # First show user message immediately
+                history.append([message, "Thinking..."])
+                yield "", history, self.get_session_info(), update_api_status()
+
+                # Get agent response
+                agent_response = self.get_agent_response(message)
+
+                # Update with actual response
+                history[-1][1] = agent_response
+                yield "", history, self.get_session_info(), update_api_status()
 
             def reset():
                 new_history, new_info = self.reset_session()
                 return new_history, new_info
 
-            submit_btn.click(respond, [msg, chatbot], [msg, chatbot, session_info])
-            msg.submit(respond, [msg, chatbot], [msg, chatbot, session_info])
+            submit_btn.click(respond, [msg, chatbot], [msg, chatbot, session_info, api_status_display])
+            msg.submit(respond, [msg, chatbot], [msg, chatbot, session_info, api_status_display])
             clear_btn.click(reset, outputs=[chatbot, session_info])
 
         interface.launch(**kwargs)
@@ -208,12 +156,8 @@ class InsuranceIntakeUI:
 
 def main():
     """Main function to run the Gradio app."""
-    # Read configuration from environment
-    host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("UI_PORT", "8501"))
-
     app = InsuranceIntakeUI()
-    app.launch(server_name=host, server_port=port)
+    app.launch(server_name="0.0.0.0", server_port=8501)
 
 
 if __name__ == "__main__":

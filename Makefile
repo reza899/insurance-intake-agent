@@ -1,4 +1,4 @@
-.PHONY: help install clean lint format run-api run-ui docker-up docker-down
+.PHONY: help install clean lint format test run-api run-ui docker-up docker-down
 
 help: ## Show available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
@@ -16,6 +16,9 @@ lint: ## Run code quality checks
 
 format: ## Format code
 	poetry run ruff format src/
+
+test: ## Run tests
+	poetry run pytest tests/e2e-tests/ -v
 
 run-api: ## Start API server
 	poetry run uvicorn src.api.main:app --reload

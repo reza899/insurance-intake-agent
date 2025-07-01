@@ -8,21 +8,23 @@ services:
     env_file:
       - .env
     environment:
-      # Override specific values for Docker networking
       - MONGODB_URL=mongodb://mongodb:27017
-      - REDIS_URL=redis://redis:6379
       - HOST=0.0.0.0
+      - EXT_PROVIDER_FALLBACK_BASE_URL=http://host.docker.internal:11434/v1
     depends_on:
       mongodb:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
       - ./logs:/app/logs
-      - ./data:/app/data
     networks:
-      - insurance-network
+      - insurance-intake-net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   ui:
     build: 
@@ -33,15 +35,14 @@ services:
     env_file:
       - .env
     environment:
-      # Override for Docker networking
       - API_BASE_URL=http://api:8000
     depends_on:
       api:
         condition: service_healthy
     networks:
-      - insurance-network
+      - insurance-intake-net
     restart: unless-stopped
-    command: ["python", "src/ui/gradio_app.py"]
+    command: ["poetry", "run", "python", "src/ui/gradio_app.py"]
 
   mongodb:
     image: mongo:6
@@ -53,7 +54,7 @@ services:
     volumes:
       - mongodb_data:/data/db
     networks:
-      - insurance-network
+      - insurance-intake-net
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 30s
@@ -61,26 +62,9 @@ services:
       retries: 3
       start_period: 40s
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - insurance-network
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
 volumes:
   mongodb_data:
-  redis_data:
 
 networks:
-  insurance-network:
+  insurance-intake-net:
     driver: bridge

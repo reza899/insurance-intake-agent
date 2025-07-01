@@ -1,21 +1,19 @@
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List
 
 from bson import ObjectId
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Customer(BaseModel):
     """Customer information model."""
 
-    name: str = Field(
-        ..., min_length=2, max_length=100, description="Customer full name"
-    )
-    birth_date: date = Field(..., description="Customer birth date")
+    name: str = Field(..., min_length=2, max_length=100, description="Customer full name")
+    birth_date: str = Field(..., description="Customer birth date in YYYY-MM-DD format")
 
     @field_validator("name")
     @classmethod
-    def validate_name(cls, v):
+    def validate_name(cls, v: str) -> str:
         """Validate customer name."""
         if not v.strip():
             raise ValueError("Name cannot be empty")
@@ -23,34 +21,38 @@ class Customer(BaseModel):
 
     @field_validator("birth_date")
     @classmethod
-    def validate_birth_date(cls, v):
+    def validate_birth_date(cls, v: str) -> str:
         """Validate birth date is reasonable."""
+        from datetime import datetime
+
+        try:
+            # Parse the date string
+            birth_date = datetime.strptime(v, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValueError("Birth date must be in YYYY-MM-DD format")
+
         today = date.today()
-        age = today.year - v.year - ((today.month, today.day) < (v.month, v.day))
+        age = today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
 
         if age < 18:
             raise ValueError("Customer must be at least 18 years old")
         if age > 120:
             raise ValueError("Invalid birth date")
 
-        return v
+        return v  # Return the original string
 
 
 class CarRegistration(BaseModel):
     """Car registration information model."""
 
     car_type: str = Field(..., min_length=2, max_length=50, description="Type of car")
-    manufacturer: str = Field(
-        ..., min_length=2, max_length=50, description="Car manufacturer"
-    )
+    manufacturer: str = Field(..., min_length=2, max_length=50, description="Car manufacturer")
     year: int = Field(..., ge=1900, le=2025, description="Manufacturing year")
-    license_plate: str = Field(
-        ..., min_length=2, max_length=20, description="License plate number"
-    )
+    license_plate: str = Field(..., min_length=2, max_length=20, description="License plate number")
 
     @field_validator("car_type", "manufacturer")
     @classmethod
-    def validate_text_fields(cls, v):
+    def validate_text_fields(cls, v: str) -> str:
         """Validate text fields."""
         if not v.strip():
             raise ValueError("Field cannot be empty")
@@ -58,7 +60,7 @@ class CarRegistration(BaseModel):
 
     @field_validator("license_plate")
     @classmethod
-    def validate_license_plate(cls, v):
+    def validate_license_plate(cls, v: str) -> str:
         """Validate license plate format."""
         cleaned = v.strip().upper().replace(" ", "").replace("-", "")
         if len(cleaned) < 2:
@@ -67,7 +69,7 @@ class CarRegistration(BaseModel):
 
     @field_validator("year")
     @classmethod
-    def validate_year(cls, v):
+    def validate_year(cls, v: int) -> int:
         """Validate manufacturing year."""
         current_year = datetime.now().year
         if v > current_year + 1:
@@ -80,12 +82,8 @@ class RegistrationRequest(BaseModel):
 
     customer: Customer
     car: CarRegistration
-    session_id: Optional[str] = None
 
-    class Config:
-        """Pydantic configuration."""
-
-        json_encoders = {date: lambda v: v.isoformat()}
+    model_config = ConfigDict(json_encoders={date: lambda v: v.isoformat()})
 
 
 class RegistrationResponse(BaseModel):
@@ -98,11 +96,10 @@ class RegistrationResponse(BaseModel):
     is_duplicate: bool = False
     duplicate_matches: List[str] = Field(default_factory=list)
 
-    class Config:
-        """Pydantic configuration."""
-
-        json_encoders = {
+    model_config = ConfigDict(
+        json_encoders={
             ObjectId: str,
             datetime: lambda v: v.isoformat(),
             date: lambda v: v.isoformat(),
         }
+    )

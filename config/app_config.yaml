@@ -2,8 +2,6 @@ application:
   name: "Insurance Intake Agent"
   version: "0.1.0"
 
-system_prompt: "You are an AI Assistant, that works at registration office in a car insurance company. Customers come to you for quote inquiries of their cars. For the quoting department, to calculate the annual cost of insurance, the following information is required. The type of car which is either Sedan, Coupe, Station Wagon, Hatchback or Minivan. The manufacturer of the car, year of construction and license plate number. Ask customer for their name and birthdate at the end."
-  
 conversation:
   required_fields:
     - car_type
@@ -12,18 +10,6 @@ conversation:
     - license_plate
     - customer_name
     - birth_date
-  
-  validation_rules:
-    car_type:
-      type: "enum"
-      values: ["Sedan", "Coupe", "Station Wagon", "Hatchback", "Minivan"]
-    year:
-      type: "range"
-      min: 1900
-      max: 2025
-    license_plate:
-      type: "regex"
-      pattern: "^[A-Z0-9]{3,8}$"
 
 duplicate_detection:
   similarity_threshold: 0.85
@@ -31,3 +17,89 @@ duplicate_detection:
     name: 0.30
     birth_date: 0.30
     license_plate: 0.40
+
+llm:
+  default_temperature: 0.1
+  default_max_tokens: 4096
+  timeout: 60
+
+prompts:
+  # System prompt for main conversation
+  system: "You are a friendly AI assistant helping customers register for car insurance. Collect required information: car type (Sedan, Coupe, Station Wagon, Hatchback, Minivan), manufacturer, year, license plate, customer name, and birth date. Be conversational, helpful, and brief in your responses."
+  
+  # Task-specific prompts
+  follow_up_question: |
+    Current info: {context_summary}
+    Missing: {missing_fields}
+    
+    Ask for the next missing item{name_greeting}. Be brief and friendly.
+  
+  validation_error: |
+    Customer errors: {errors}
+    
+    Ask them to correct the information politely. Be specific and friendly.
+  
+  duplicate_comparison: |
+    Compare these insurance registrations for duplicates. Score from 0.0 to 1.0 based on name, birth date, and license plate similarity. Be strict - different people should score low. Consider typos and formatting differences as minor. Return only the numeric score.
+    
+    NEW: {new_registration}
+    
+    EXISTING: {existing_registration}
+    
+    Score:
+
+response_templates:
+  registration_summary: |
+    Perfect! Your car insurance registration has been completed successfully.
+    
+    Registration ID: {registration_id}
+    
+    Summary:
+    - Customer: {customer_name}
+    - Birth Date: {birth_date}
+    - Vehicle: {year} {manufacturer} {car_type}
+    - License Plate: {license_plate}
+    
+    Thank you for choosing our insurance services!
+  
+  registration_summary_with_duplicate: |
+    Perfect! I've completed your registration despite the potential duplicate.
+    
+    Registration ID: {registration_id}
+    
+    Summary:
+    - Customer: {customer_name}
+    - Birth Date: {birth_date}
+    - Vehicle: {year} {manufacturer} {car_type}
+    - License Plate: {license_plate}
+    
+    Thank you for choosing our insurance services!
+  
+  duplicate_found: |
+    I found a very similar registration in our system:
+    
+    Customer: {masked_name}
+    Birth Date: {masked_birth_date}
+    Vehicle: {car_info}
+    License Plate: {license_plate}
+    Similarity: {similarity}
+    
+    This might be a duplicate. Would you like to proceed anyway or check this existing registration?
+  
+  duplicate_review_response: |
+    I understand you'd like to review the existing registration. Please contact our customer service team to review or update existing records. For now, would you like to start a new registration process or end this session?
+  
+  clarification_needed: |
+    I'm not sure if you'd like to proceed with the new registration or check the existing one. Could you please say 'yes' to proceed with a new registration or 'no' to stop?
+  
+  error_fallback: |
+    I apologize, but there was an error processing your registration. Please try again or contact support.
+  
+  validation_error_fallback: |
+    I notice there are some issues with the information: {errors}. Could you please provide the correct details?
+  
+  missing_data_fallback: |
+    Thank you{name_greeting}! Could you please provide your {field_name}?
+  
+  default_greeting: |
+    I'd be happy to help you with your car insurance registration. Could you please tell me your name?
