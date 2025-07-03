@@ -11,7 +11,7 @@ This application implements a conversational agent that collects required car in
 ## Key Features
 
 - 🤖 **Conversational Interface**: Natural language data collection using AI
-- 🧠 **Dual LLM Support**: OpenAI-compatible APIs + Local HuggingFace models
+- 🧠 **LLM Integration**: LiteLLM-powered with multi-provider support
 - 🔍 **Smart Data Extraction**: Automatically extract required insurance fields
 - 📊 **Duplicate Detection**: Fuzzy matching to identify existing customers
 - 🌐 **REST API**: FastAPI-based backend with automatic documentation
@@ -25,7 +25,7 @@ This application implements a conversational agent that collects required car in
 - **Backend**: FastAPI + Python 3.12+
 - **Frontend**: Gradio
 - **Database**: MongoDB
-- **AI/LLM**: OpenAI-compatible APIs, HuggingFace Transformers
+- **AI/LLM**: LiteLLM with multi-provider support
 - **Package Management**: Poetry
 
 ## Prerequisites
@@ -98,19 +98,17 @@ curl -X POST "http://localhost:8000/chat" \
 
 ## Configuration
 
-**Required**: Add your OpenAI API key to `.env`:
+**LLM Configuration:**
 ```bash
-EXT_PROVIDER_API_KEY=sk-your-openai-key-here
+LLM_PRIMARY_MODEL=ollama/gemma3:4b
+LLM_FALLBACK_MODELS=gpt-4o-mini,huggingface/google/gemma-3-4b-it
+LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=4096
 ```
-
-**LLM Providers:**
-- `USE_HF_LOCAL=true` - Switch to local HuggingFace models (Phi-3-mini)
-- `EXT_PROVIDER_MODEL=gpt-4` - Change OpenAI model  
-- `EXT_PROVIDER_FALLBACK_MODEL=llama2` - Change Ollama fallback model
 
 ## Testing
 
-Run comprehensive test suite covering 24 end-to-end scenarios:
+Run the test suite:
 ```bash
-make test  # Runs integration tests, API tests, and real LLM tests
+make test
 ```
