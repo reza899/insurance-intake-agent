@@ -27,3 +27,6 @@ class ChatResponse(BaseModel):
     missing_fields: List[str] = Field(default_factory=list, description="Fields still missing")
     status: str = Field(default="processing", description="Current conversation status")
     errors: Optional[List[str]] = Field(None, description="Validation errors if any")
+    duplicates: Optional[List[Dict[str, Any]]] = Field(None, description="Potential duplicate registrations found")
+    registration_id: Optional[str] = Field(None, description="Registration ID if successfully created")
+    error: Optional[str] = Field(None, description="Error message if processing failed")

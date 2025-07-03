@@ -1,31 +1,70 @@
 application:
   name: "Insurance Intake Agent"
   version: "0.1.0"
+  description: "AI-powered conversational agent for car insurance registration"
 
-conversation:
-  required_fields:
-    - car_type
-    - manufacturer
-    - year
-    - license_plate
-    - customer_name
-    - birth_date
+required_fields:
+  - car_type
+  - manufacturer
+  - year
+  - license_plate
+  - customer_name
+  - birth_date
 
 duplicate_detection:
   similarity_threshold: 0.85
-  weights:
-    name: 0.30
-    birth_date: 0.30
-    license_plate: 0.40
+  mask_characters: "***"
+  context_keywords: ["duplicate", "existing", "already registered", "found registration", "similar registration", "might be your existing"]
+  confirmation_words: ["yes", "proceed", "continue", "update", "correct", "confirm", "1", "2", "3"]
 
-llm:
-  default_temperature: 0.1
-  default_max_tokens: 4096
-  timeout: 60
+llm_intents:
+  proceed: "PROCEED"
+  update: "UPDATE"
+  unclear: "UNCLEAR"
+
+conversation_status:
+  collecting_data: "collecting_data"
+  duplicate_found: "duplicate_found"
+  completed: "completed"
+  error: "error"
+  informational: "informational"
+  validation_error: "validation_error"
+
+informational_keywords: ["what", "how", "can you", "tell me", "explain", "info", "information", "help", "guide", "process", "steps", "about", "details"]
+
+completion_indicators: ["registration is complete", "registration complete", "registration id:", "thank you for choosing our service", "your car insurance registration is complete"]
+
+database:
+  collections:
+    registrations: "registrations"
+
 
 prompts:
   # System prompt for main conversation
   system: "You are a friendly AI assistant helping customers register for car insurance. Collect required information: car type (Sedan, Coupe, Station Wagon, Hatchback, Minivan), manufacturer, year, license plate, customer name, and birth date. Be conversational, helpful, and brief in your responses."
+  
+  # Data extraction prompt
+  data_extraction: |
+    Extract insurance data from this conversation: "{message}"
+
+    Current extracted data: {existing_data}
+
+    Extract any new information and return ONLY a JSON object. Use these exact field names and formats:
+    - "customer_name": full name (proper case)
+    - "car_type": vehicle type in title case (Sedan, SUV, Coupe, Hatchback, etc.)
+    - "manufacturer": car brand in title case (Toyota, Ford, etc.) 
+    - "year": 4-digit year as string (1900-2025)
+    - "license_plate": license plate in UPPERCASE (convert all letters to uppercase)
+    - "birth_date": date as YYYY-MM-DD (must include day, month and year. If only month/year given like "aug 2000", use first day: "2000-08-01")
+
+    Important formatting rules:
+    - Always convert license plates to UPPERCASE (e.g., "888g4" → "888G4")
+    - For birth dates, if day is missing, default to 01 (e.g., "aug 2000" → "2000-08-01")
+    - Ignore address information unless specifically asked
+
+    Example: {{"car_type": "Sedan", "manufacturer": "Toyota", "license_plate": "ABC123"}}
+
+    Return only the JSON object with new/updated fields:
   
   # Task-specific prompts
   follow_up_question: |
@@ -47,6 +86,48 @@ prompts:
     EXISTING: {existing_registration}
     
     Score:
+  
+  # Intent detection for duplicate response
+  duplicate_intent_detection: |
+    User said: "{message}"
+
+    Context: User is responding to duplicate detection. They need to choose between:
+    1. Update existing registration 
+    2. Create new registration
+    3. Review existing registration
+
+    Determine their intent and respond with ONLY one word:
+    - "UPDATE" if they chose option 1 or want to update existing
+    - "CREATE" if they chose option 2 or want to create new  
+    - "UNCLEAR" if they chose option 3 or their intent is unclear
+    
+    If user says "1" respond: UPDATE
+    If user says "2" respond: CREATE
+    If user says "3" respond: UNCLEAR
+
+    Response:
+  
+  # Ask for missing field
+  ask_missing_field: |
+    Ask the user for their {missing_field} for car insurance registration. Be friendly and conversational but avoid repetitive greetings. Current data: {extracted_data}
+    
+    Important: Do NOT start with "Hi [name]!" if you already know their name. Just ask for the missing information naturally.
+  
+  # Informational response about registration process
+  informational_response: |
+    I help you register for car insurance through a simple conversation. Here's what I need:
+
+    **Required Information:**
+    • Your full name and birth date
+    • Car details: type (Sedan, SUV, etc.), manufacturer, year
+    • License plate number
+
+    **Process:**
+    1. I'll ask for your information in a friendly conversation
+    2. I'll check for any existing registrations to avoid duplicates
+    3. Once complete, you'll get a registration ID
+
+    Ready to start? Just tell me your name to begin!
 
 response_templates:
   registration_summary: |
@@ -84,10 +165,28 @@ response_templates:
     License Plate: {license_plate}
     Similarity: {similarity}
     
-    This might be a duplicate. Would you like to proceed anyway or check this existing registration?
+    This might be your existing registration. Would you like to:
+    1. Update the existing registration with your new details
+    2. Create a new separate registration
+    3. Review the existing registration first
+    
+    Please let me know which option you prefer.
   
   duplicate_review_response: |
     I understand you'd like to review the existing registration. Please contact our customer service team to review or update existing records. For now, would you like to start a new registration process or end this session?
+  
+  duplicate_update_confirmation: |
+    Perfect! I'll update your existing registration with the new details you provided:
+    
+    Updated Registration ID: {registration_id}
+    
+    New Details:
+    - Customer: {customer_name}
+    - Birth Date: {birth_date}
+    - Vehicle: {year} {manufacturer} {car_type}
+    - License Plate: {license_plate}
+    
+    Your registration has been successfully updated!
   
   clarification_needed: |
     I'm not sure if you'd like to proceed with the new registration or check the existing one. Could you please say 'yes' to proceed with a new registration or 'no' to stop?
@@ -99,7 +198,10 @@ response_templates:
     I notice there are some issues with the information: {errors}. Could you please provide the correct details?
   
   missing_data_fallback: |
-    Thank you{name_greeting}! Could you please provide your {field_name}?
+    Thank you{name_greeting}! Could you please tell me {field_prompt}?
   
   default_greeting: |
     I'd be happy to help you with your car insurance registration. Could you please tell me your name?
+  
+  error_message_template: "Customer {field}: {message}"
+  default_error_response: "I apologize, but I encountered an error processing your request."

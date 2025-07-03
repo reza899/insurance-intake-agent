@@ -18,7 +18,7 @@ COPY . .
 
 RUN poetry run ruff check src/
 RUN poetry run mypy src/
-RUN poetry run pytest tests/e2e-tests/ -v
+RUN poetry run pytest tests/e2e-tests/
 
 RUN mkdir -p logs
 

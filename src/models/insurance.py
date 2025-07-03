@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import List
+from typing import List, Optional
 
 from bson import ObjectId
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -10,6 +10,7 @@ class Customer(BaseModel):
 
     name: str = Field(..., min_length=2, max_length=100, description="Customer full name")
     birth_date: str = Field(..., description="Customer birth date in YYYY-MM-DD format")
+    address: Optional[str] = Field(None, min_length=5, max_length=200, description="Customer address")
 
     @field_validator("name")
     @classmethod
@@ -18,6 +19,7 @@ class Customer(BaseModel):
         if not v.strip():
             raise ValueError("Name cannot be empty")
         return v.strip().title()
+
 
     @field_validator("birth_date")
     @classmethod

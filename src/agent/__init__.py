@@ -1,5 +1,4 @@
-from .duplicate_detector import DuplicateDetector
-from .extractor import DataExtractor
+from .core import DataExtractor, DuplicateDetector
 from .orchestrator import InsuranceAgent
 
 __all__ = [

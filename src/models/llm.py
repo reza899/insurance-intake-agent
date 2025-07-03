@@ -32,3 +32,12 @@ class LLMError(Exception):
         self.message = message
         self.retryable = retryable
         super().__init__(f"{provider}: {message}")
+
+
+class LLMServiceResponse(BaseModel):
+    """Response format from LLM service."""
+
+    content: str = Field(..., description="Processed response content")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence score")
+    success: bool = Field(..., description="Whether the request was successful")
+    error_message: Optional[str] = Field(None, description="Error details if failed")

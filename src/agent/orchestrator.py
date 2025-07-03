@@ -1,378 +1,299 @@
-from datetime import UTC, datetime
+import logging
 from typing import Dict, List, Optional
 
-from bson import ObjectId
-
 from config.settings import settings
-from src.agent.duplicate_detector import DuplicateDetector
-from src.agent.extractor import DataExtractor
-from src.database.mongodb import mongodb
-from src.llm.router import LLMRouter
-from src.models import LLMRequest, LLMResponse
+from src.agent.core import DataExtractor, DuplicateDetector
+from src.models import ConversationHistoryItem
 from src.models.insurance import CarRegistration, Customer, RegistrationResponse
+from src.models.response_types import AgentResponseData
+from src.utils.llm_helpers import create_llm_request_and_get_response
+from src.utils.registration import RegistrationService
 
-from .constants import (
-    ConversationStatus,
-    DatabaseCollections,
-    DuplicateKeywords,
-    ErrorMessages,
-)
+logger = logging.getLogger(__name__)
 
 
 class InsuranceAgent:
-    """Main orchestrator for insurance registration conversations."""
+    """Insurance registration agent powered by LLM decision making."""
 
-    def __init__(self):
-        """Initialize insurance agent."""
-        self.extractor = DataExtractor()
-        self.duplicate_detector = DuplicateDetector()
-        self.llm_router = LLMRouter()
 
-    async def process_message(self, message: str, conversation_history: List[Dict] = None) -> Dict:
-        """Process a user message and return agent response."""
-        conversation_history = conversation_history or []
-
-        # Check if this is a response to a duplicate confirmation
-        if InsuranceAgent._is_duplicate_confirmation_response(message, conversation_history):
-            return await self._handle_duplicate_confirmation(message, conversation_history)
-
-        # Extract data from current message and history
-        extracted_data = await self._extract_all_data(message, conversation_history)
-
-        # Check what's missing
-        missing_fields = DataExtractor.get_missing_fields(extracted_data)
-
-        # Validate current data
-        customer, car, validation_errors = self.extractor.validate_data(extracted_data)
-
-        # Generate appropriate response
-        if validation_errors:
-            response_text = await self._generate_validation_error_response(validation_errors)
-            return {
-                "response": response_text,
-                "extracted_data": extracted_data,
-                "missing_fields": missing_fields,
-                "status": ConversationStatus.VALIDATION_ERROR,
-                "errors": validation_errors,
-            }
-
-        elif missing_fields:
-            response_text = await self._generate_follow_up_question(missing_fields, extracted_data)
-            return {
-                "response": response_text,
-                "extracted_data": extracted_data,
-                "missing_fields": missing_fields,
-                "status": ConversationStatus.COLLECTING_DATA,
-            }
-
-        else:
-            # All data collected and valid - check for duplicates and complete registration
-            return await self._complete_registration(customer, car, extracted_data)
-
-    async def _extract_all_data(self, current_message: str, conversation_history: List[Dict]) -> Dict:
-        """Extract data from current message and entire conversation history."""
-        # Build complete conversation context
-        full_conversation = ""
-        for msg in conversation_history:
-            if msg.get("role") == "user":
-                full_conversation += f"User: {msg.get('content', '')}\n"
-
-        # Add current message
-        full_conversation += f"User: {current_message}\n"
-
-        # Extract from entire conversation context at once
-        extracted_data = await self.extractor.extract_data(full_conversation, {})
-
-        return extracted_data
-
-    async def _generate_follow_up_question(self, missing_fields: List[str], current_data: Dict) -> str:
-        """Generate intelligent, personalized follow-up question."""
-        name_greeting = self._get_name_greeting(current_data)
-        context_summary = self._build_context_summary(current_data)
-
-        prompt = settings.get_prompt("follow_up_question").format(
-            context_summary=context_summary, missing_fields=", ".join(missing_fields), name_greeting=name_greeting
-        )
-
+    async def process_message(
+        self, message: str, conversation_history: List[ConversationHistoryItem] = None
+    ) -> AgentResponseData:
+        """Process message with LLM making all decisions."""
         try:
-            response = await self._make_llm_request(prompt)
-            return response.content
-        except Exception:
-            return self._get_fallback_response(missing_fields, name_greeting)
+            # Check if this is an informational query
+            if await InsuranceAgent._is_informational_query(message):
+                return await InsuranceAgent._handle_informational_query(message)
 
-    def _get_name_greeting(self, current_data: Dict) -> str:
-        """Extract name greeting from current data."""
-        customer_name = current_data.get("customer_name", "")
-        return f", {customer_name.split()[0]}" if customer_name else ""
+            # Check if last interaction was a completed registration
+            if InsuranceAgent._was_last_registration_completed(conversation_history or []):
+                # Start fresh conversation for new registration
+                extracted_data = await DataExtractor.extract_data(message, {})
+            else:
+                # Continue existing conversation
+                conversation = InsuranceAgent._build_conversation(message, conversation_history or [])
+                extracted_data = await DataExtractor.extract_data(conversation, {})
 
-    def _build_context_summary(self, current_data: Dict) -> str:
-        """Build context summary from collected data."""
-        field_labels = {
-            "car_type": "Car type",
-            "manufacturer": "Manufacturer",
-            "year": "Year",
-            "license_plate": "License plate",
-            "customer_name": "Customer",
-            "birth_date": "Birth date",
-        }
+            # Get current state
+            missing_fields = DataExtractor.get_missing_fields(extracted_data)
+            customer, car, validation_errors = DataExtractor.validate_data(extracted_data)
+            duplicates = await InsuranceAgent._get_duplicates_if_ready(customer, car, missing_fields, validation_errors)
 
-        collected_info = [
-            f"{field_labels[field]}: {value}"
-            for field, value in current_data.items()
-            if value and field in field_labels
-        ]
+            # Check if this is a duplicate confirmation response
+            if await InsuranceAgent._is_duplicate_response(message, conversation_history, duplicates):
+                return await InsuranceAgent._handle_duplicate_response(
+                    message, extracted_data, customer, car, duplicates
+                )
 
-        return "; ".join(collected_info) if collected_info else "No information collected yet"
-
-    def _get_fallback_response(self, missing_fields: List[str], name_greeting: str) -> str:
-        """Get fallback response when LLM fails."""
-        next_field = missing_fields[0] if missing_fields else "information"
-        field_name = next_field.replace("_", " ")
-        return settings.get_response_template("missing_data_fallback").format(
-            name_greeting=name_greeting, field_name=field_name
-        )
-
-    async def _generate_validation_error_response(self, errors: List[str]) -> str:
-        """Generate response for validation errors."""
-        prompt = settings.get_prompt("validation_error").format(errors="; ".join(errors))
-
-        try:
-            response = await self._make_llm_request(prompt)
-            return InsuranceAgent._clean_response(response.content)
-        except Exception:
-            return settings.get_response_template("validation_error_fallback").format(errors="; ".join(errors))
-
-    async def _complete_registration(self, customer: Customer, car: CarRegistration, extracted_data: Dict) -> Dict:
-        """Complete the registration process."""
-        try:
-            # Check for duplicates
-            duplicates = await self.duplicate_detector.find_duplicates(customer, car)
-            is_duplicate = self.duplicate_detector.is_likely_duplicate(duplicates)
-
-            if is_duplicate:
-                return self._build_duplicate_response(duplicates, extracted_data)
-
-            # No duplicates - save registration
-            registration_id = await InsuranceAgent._save_registration(customer, car, duplicates)
-            return self._build_success_response(registration_id, customer, car, extracted_data)
-
+            # Let LLM decide everything and execute
+            return await InsuranceAgent._llm_decide_and_execute(
+                message, extracted_data, missing_fields, validation_errors, duplicates, customer, car
+            )
         except Exception as e:
+            logger.error(f"Error: {e}")
+            return {
+                "response": settings.get_response_template("default_error_response"),
+                "extracted_data": {},
+                "status": settings.conversation_status_config.get("error", "error"),
+                "missing_fields": [],
+                "error": str(e)
+            }
+
+    @staticmethod
+    def _build_conversation(message: str, history: List[ConversationHistoryItem]) -> str:
+        """Build conversation text."""
+        conversation = "\n".join([f"{item.role}: {item.content}" for item in history])
+        return f"{conversation}\nuser: {message}" if conversation else f"user: {message}"
+
+    @staticmethod
+    async def _get_duplicates_if_ready(customer: Optional[Customer], car: Optional[CarRegistration],
+                                       missing_fields: List[str], validation_errors: List[str]) -> List[Dict]:
+        """Get duplicates only if data is complete and valid."""
+        if customer and car and not missing_fields and not validation_errors:
+            return await DuplicateDetector.find_duplicates(customer, car)
+        return []
+
+    @staticmethod
+    async def _is_duplicate_response(
+        message: str, history: List[ConversationHistoryItem], duplicates: List[Dict]
+    ) -> bool:
+        """Check if this is a response to duplicate detection."""
+        if not history or not duplicates:
+            return False
+
+        # Get last assistant message
+        last_message = InsuranceAgent._get_last_assistant_message(history)
+        if not last_message:
+            return False
+
+        # Check if last message mentioned duplicates using config keywords
+        duplicate_keywords = settings.duplicate_detection_config.get("context_keywords", [])
+        return any(keyword in last_message.lower() for keyword in duplicate_keywords)
+
+    @staticmethod
+    async def _handle_duplicate_response(message: str, extracted_data: Dict, customer: Customer,
+                                       car: CarRegistration, duplicates: List[Dict]) -> AgentResponseData:
+        """Handle user response to duplicate detection using LLM."""
+        prompt = settings.get_prompt("duplicate_intent_detection").format(message=message)
+
+        intent = await create_llm_request_and_get_response(prompt, "You determine user intent from their response.")
+        intent = intent.strip().upper() if intent else "UNCLEAR"
+
+        try:
+            if intent == "UPDATE":
+                duplicate_id = duplicates[0]["id"]
+                await RegistrationService.update_existing_registration(duplicate_id, customer, car)
+                response_text = settings.get_response_template("duplicate_update_confirmation").format(
+                    registration_id=duplicate_id,
+                    customer_name=customer.name,
+                    birth_date=customer.birth_date,
+                    year=car.year,
+                    manufacturer=car.manufacturer,
+                    car_type=car.car_type,
+                    license_plate=car.license_plate
+                )
+                return {
+                    "response": response_text,
+                    "extracted_data": extracted_data,
+                    "status": settings.conversation_status_config.get("completed", "completed"),
+                    "missing_fields": [],
+                    "registration_id": duplicate_id,
+                }
+            elif intent == "CREATE":
+                registration_id = await RegistrationService.save_registration(customer, car, duplicates)
+                response_text = settings.get_response_template("registration_summary").format(
+                    registration_id=registration_id,
+                    customer_name=customer.name,
+                    birth_date=customer.birth_date,
+                    year=car.year,
+                    manufacturer=car.manufacturer,
+                    car_type=car.car_type,
+                    license_plate=car.license_plate
+                )
+                return {
+                    "response": response_text,
+                    "extracted_data": extracted_data,
+                    "status": settings.conversation_status_config.get("completed", "completed"),
+                    "missing_fields": [],
+                    "registration_id": registration_id,
+                }
+        except Exception as e:
+            logger.error(f"Registration operation failed: {e}")
             return {
                 "response": settings.get_response_template("error_fallback"),
                 "extracted_data": extracted_data,
-                "status": ConversationStatus.ERROR,
+                "status": settings.conversation_status_config.get("error", "error"),
                 "missing_fields": [],
-                "error": str(e),
+                "error": str(e)
             }
 
-    @staticmethod
-    async def _save_registration(customer: Customer, car: CarRegistration, duplicates: List[Dict]) -> str:
-        """Save registration to database."""
-        try:
-            collection = mongodb.get_collection(DatabaseCollections.REGISTRATIONS)
-
-            registration_doc = {
-                "_id": ObjectId(),
-                "customer": customer.model_dump(),
-                "car": car.model_dump(),
-                "created_at": datetime.now(UTC),
-                "is_duplicate": len(duplicates) > 0,
-                "duplicate_matches": [d["id"] for d in duplicates[:3]],
-            }
-
-            result = await collection.insert_one(registration_doc)
-            return str(result.inserted_id)
-
-        except Exception as e:
-            raise Exception(f"{ErrorMessages.REGISTRATION_SAVE_FAILED}: {e}")
-
-    @staticmethod
-    async def get_registration(registration_id: str) -> Optional[RegistrationResponse]:
-        """Get registration by ID."""
-        try:
-            collection = mongodb.get_collection(DatabaseCollections.REGISTRATIONS)
-            registration = await collection.find_one({"_id": ObjectId(registration_id)})
-
-            if not registration:
-                return None
-
-            return RegistrationResponse(
-                id=str(registration["_id"]),
-                customer=Customer(**registration["customer"]),
-                car=CarRegistration(**registration["car"]),
-                created_at=registration["created_at"],
-                is_duplicate=registration.get("is_duplicate", False),
-                duplicate_matches=registration.get("duplicate_matches", []),
-            )
-
-        except Exception:
-            return None
-
-    @staticmethod
-    def _clean_response(response: str) -> str:
-        """Extract the actual response after Qwen's thinking process."""
-        import re
-
-        # Look for content AFTER </think> tags (closed thinking)
-        after_think_match = re.search(r"</think>\s*(.+)", response, flags=re.DOTALL)
-        if after_think_match:
-            cleaned = after_think_match.group(1).strip()
-            # Remove surrounding quotes if present
-            if cleaned.startswith('"') and cleaned.endswith('"'):
-                cleaned = cleaned[1:-1]
-            elif cleaned.startswith("'") and cleaned.endswith("'"):
-                cleaned = cleaned[1:-1]
-            return cleaned.strip() if cleaned.strip() else settings.get_response_template("default_greeting")
-
-        # If no closed </think> tag, look for content before <think> (unlikely but possible)
-        before_think = re.split(r"<think>", response)[0].strip()
-        if before_think:
-            return before_think
-
-        # Fallback - just remove think tags entirely and see what's left
-        cleaned = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL)
-        cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL)
-        cleaned = cleaned.strip()
-
-        return cleaned if cleaned else settings.get_response_template("default_greeting")
-
-    async def _make_llm_request(self, prompt: str) -> LLMResponse:
-        """Create and send LLM request with standard settings."""
-        request = LLMRequest(
-            prompt=prompt,
-            context=settings.system_prompt,
-            temperature=settings.llm_defaults["default_temperature"],
-            max_tokens=settings.llm_defaults["default_max_tokens"],
-        )
-        return await self.llm_router.route_request(request)
-
-    def _build_duplicate_response(self, duplicates: List[Dict], extracted_data: Dict) -> Dict:
-        """Build response for duplicate detection scenario."""
-        duplicate_info = duplicates[0]
-
-        response_text = settings.get_response_template("duplicate_found").format(
-            masked_name=duplicate_info.get("masked_name", "N/A"),
-            masked_birth_date=duplicate_info.get("masked_birth_date", "N/A"),
-            car_info=duplicate_info.get("car_info", "Unknown vehicle"),
-            license_plate=duplicate_info["license_plate"],
-            similarity=f"{duplicate_info['similarity_score']:.0%}",
-        )
-
+        # Unclear or failed intent detection
         return {
-            "response": response_text,
+            "response": settings.get_response_template("clarification_needed"),
             "extracted_data": extracted_data,
-            "status": ConversationStatus.DUPLICATE_FOUND,
+            "status": settings.conversation_status_config.get("duplicate_found", "duplicate_found"),
             "missing_fields": [],
             "duplicates": duplicates,
         }
 
-    def _build_success_response(
-        self, registration_id: str, customer: Customer, car: CarRegistration, extracted_data: Dict
-    ) -> Dict:
-        """Build response for successful registration."""
-        response_text = settings.get_response_template("registration_summary").format(
-            registration_id=registration_id,
-            customer_name=customer.name,
-            birth_date=customer.birth_date,
-            year=car.year,
-            manufacturer=car.manufacturer,
-            car_type=car.car_type,
-            license_plate=car.license_plate,
-        )
+    @staticmethod
+    async def _llm_decide_and_execute(
+        message: str, extracted_data: Dict, missing_fields: List[str],
+        validation_errors: List[str],
+        duplicates: List[Dict],
+        customer: Optional[Customer],
+        car: Optional[CarRegistration]
+    ) -> AgentResponseData:
+        """LLM decides what to do based on current state."""
 
-        return {
-            "response": response_text,
-            "extracted_data": extracted_data,
-            "status": ConversationStatus.COMPLETED,
-            "missing_fields": [],
-            "registration_id": registration_id,
-        }
-
-    async def _proceed_with_registration(self, customer: Customer, car: CarRegistration, extracted_data: Dict) -> Dict:
-        """Handle user's decision to proceed with registration despite duplicates."""
-        try:
-            duplicates = await self.duplicate_detector.find_duplicates(customer, car)
-            registration_id = await InsuranceAgent._save_registration(customer, car, duplicates)
-
-            response_text = settings.get_response_template("registration_summary_with_duplicate").format(
-                registration_id=registration_id,
-                customer_name=customer.name,
-                birth_date=customer.birth_date,
-                year=car.year,
-                manufacturer=car.manufacturer,
-                car_type=car.car_type,
-                license_plate=car.license_plate,
+        # Handle validation errors
+        if validation_errors:
+            response_text = settings.get_response_template("validation_error_fallback").format(
+                errors=", ".join(validation_errors)
             )
+            return {
+                "response": response_text,
+                "extracted_data": extracted_data,
+                "status": settings.conversation_status_config.get("validation_error", "validation_error"),
+                "missing_fields": missing_fields,
+                "errors": validation_errors,
+            }
+
+        # Handle missing fields
+        if missing_fields:
+            # Use LLM to ask for missing field naturally
+            prompt = settings.get_prompt("ask_missing_field").format(
+                missing_field=missing_fields[0],
+                extracted_data=extracted_data
+            )
+            response_text = await create_llm_request_and_get_response(
+                prompt=prompt, context=settings.get_prompt("system")
+            )
+            if not response_text:
+                response_text = f"Could you please provide your {missing_fields[0]}?"
 
             return {
                 "response": response_text,
                 "extracted_data": extracted_data,
-                "status": ConversationStatus.COMPLETED,
-                "registration_id": registration_id,
+                "status": settings.conversation_status_config.get("collecting_data", "collecting_data"),
+                "missing_fields": missing_fields,
             }
-        except Exception as e:
+
+        # Handle duplicates found
+        if duplicates and customer and car:
+            # Use generic response to protect privacy
+            response_text = (
+                "I found an existing registration in our system that appears to be very "
+                "similar to your information. Would you like to:\n\n"
+                "1. Update the existing registration with your new details\n"
+                "2. Create a new separate registration\n"
+                "3. Review the existing registration first\n\n"
+                "Please let me know which option you prefer."
+            )
             return {
-                "response": settings.get_response_template("error_fallback"),
-                "status": ConversationStatus.ERROR,
-                "error": str(e),
+                "response": response_text,
+                "extracted_data": extracted_data,
+                "status": settings.conversation_status_config.get("duplicate_found", "duplicate_found"),
+                "missing_fields": [],
+                "duplicates": duplicates,
             }
+
+        # Complete registration
+        if customer and car:
+            try:
+                registration_id = await RegistrationService.save_registration(customer, car, [])
+                response_text = settings.get_response_template("registration_summary").format(
+                    registration_id=registration_id,
+                    customer_name=customer.name,
+                    birth_date=customer.birth_date,
+                    year=car.year,
+                    manufacturer=car.manufacturer,
+                    car_type=car.car_type,
+                    license_plate=car.license_plate
+                )
+                return {
+                    "response": response_text,
+                    "extracted_data": extracted_data,
+                    "status": settings.conversation_status_config.get("completed", "completed"),
+                    "missing_fields": [],
+                    "registration_id": registration_id,
+                }
+            except Exception as e:
+                logger.error(f"Registration failed: {e}")
+                return {
+                "response": settings.get_response_template("error_fallback"),
+                "extracted_data": extracted_data,
+                "status": settings.conversation_status_config.get("error", "error"),
+                "missing_fields": [],
+                "error": str(e)
+            }
+
+        # Default: continue conversation
+        return {
+            "response": settings.get_response_template("default_greeting"),
+            "extracted_data": extracted_data,
+            "status": settings.conversation_status_config.get("collecting_data", "collecting_data"),
+            "missing_fields": missing_fields,
+        }
 
     @staticmethod
-    def _is_duplicate_confirmation_response(message: str, conversation_history: List[Dict]) -> bool:
-        """Check if the current message is responding to a duplicate confirmation."""
-        # Check if the last assistant message mentioned duplicates
-        if not conversation_history:
+    def _get_last_assistant_message(history: List[ConversationHistoryItem]) -> Optional[str]:
+        """Get the last assistant message for context."""
+        for msg in reversed(history):
+            if msg.role == "assistant":
+                return msg.content
+        return None
+
+    @staticmethod
+    def _was_last_registration_completed(history: List[ConversationHistoryItem]) -> bool:
+        """Check if the last assistant message indicated a completed registration."""
+        last_message = InsuranceAgent._get_last_assistant_message(history)
+        if not last_message:
             return False
 
-        last_assistant_message = None
-        for msg in reversed(conversation_history):
-            if msg.get("role") == "assistant":
-                last_assistant_message = msg.get("content", "")
-                break
+        # Check for completion indicators from config
+        completion_phrases = settings.get_config("completion_indicators", [])
+        return any(phrase in last_message.lower() for phrase in completion_phrases)
 
-        if not last_assistant_message:
-            return False
+    @staticmethod
+    async def _is_informational_query(message: str) -> bool:
+        """Check if user is asking for information rather than registering."""
+        info_keywords = settings.get_config("informational_keywords", [])
+        return any(keyword in message.lower() for keyword in info_keywords)
 
-        # Check if last message was about duplicates
-        is_duplicate_context = any(
-            keyword in last_assistant_message.lower() for keyword in DuplicateKeywords.DUPLICATE_CONTEXT
-        )
+    @staticmethod
+    async def _handle_informational_query(message: str) -> AgentResponseData:
+        """Handle informational queries about the registration process."""
+        response = settings.get_prompt("informational_response")
 
-        # Check if current response is a confirmation (yes/no type)
-        is_confirmation = any(word in message.lower() for word in DuplicateKeywords.CONFIRMATION_WORDS)
+        return {
+            "response": response,
+            "extracted_data": {},
+            "status": settings.conversation_status_config.get("informational", "informational"),
+            "missing_fields": [],
+        }
 
-        return is_duplicate_context and is_confirmation
-
-    async def _handle_duplicate_confirmation(self, message: str, conversation_history: List[Dict]) -> Dict:
-        """Handle user's response to duplicate confirmation."""
-        message_lower = message.lower()
-
-        # Extract original registration data from conversation history
-        extracted_data = await self._extract_all_data("", conversation_history[:-1])  # Exclude current message
-        customer, car, _ = self.extractor.validate_data(extracted_data)
-
-        if not customer or not car:
-            return {"response": settings.get_response_template("error_fallback"), "status": ConversationStatus.ERROR}
-
-        # Determine user's intent
-        wants_to_proceed = any(keyword in message_lower for keyword in DuplicateKeywords.PROCEED_KEYWORDS)
-        wants_to_check = any(keyword in message_lower for keyword in DuplicateKeywords.CHECK_KEYWORDS)
-
-        if wants_to_proceed:
-            return await self._proceed_with_registration(customer, car, extracted_data)
-
-        elif wants_to_check:
-            # User wants to check/review existing registration
-            return {
-                "response": settings.get_response_template("duplicate_review_response"),
-                "extracted_data": extracted_data,
-                "status": ConversationStatus.DUPLICATE_REVIEW_REQUESTED,
-            }
-
-        else:
-            # Unclear response - ask for clarification
-            return {
-                "response": settings.get_response_template("clarification_needed"),
-                "extracted_data": extracted_data,
-                "status": ConversationStatus.CLARIFICATION_NEEDED,
-            }
+    @staticmethod
+    async def get_registration(registration_id: str) -> Optional[RegistrationResponse]:
+        """Get registration by ID."""
+        return await RegistrationService.get_registration(registration_id)

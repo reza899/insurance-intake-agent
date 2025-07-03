@@ -1,19 +1,29 @@
 from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from config.settings import settings
 from src.agent.orchestrator import InsuranceAgent
 from src.database.mongodb import mongodb
 from src.models.api import ChatRequest, ChatResponse
 from src.models.insurance import RegistrationResponse
+from src.utils.exceptions import (
+    ConfigurationError,
+    ConversationError,
+    DataExtractionError,
+    DuplicateDetectionError,
+    RegistrationError,
+    RegistrationNotFoundError,
+)
 from src.utils.logging import get_logger, setup_logging
 
 logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application lifespan events."""
     # Startup
     setup_logging()
@@ -38,20 +48,21 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     """Create and configure FastAPI application."""
+    app_config = settings._app_config.get("application", {})
     app = FastAPI(
-        title="Insurance Intake Agent API",
-        description="AI-powered conversational agent for car insurance registration",
-        version="0.1.0",
+        title=f"{app_config['name']} API",
+        description=app_config["description"],
+        version=app_config["version"],
         lifespan=lifespan,
     )
 
     @app.get("/health")
-    async def health():
+    async def health() -> JSONResponse:
         """Basic health check endpoint."""
         return JSONResponse({"status": "healthy", "service": "Insurance Intake Agent API"})
 
     @app.get("/health/db")
-    async def health_db():
+    async def health_db() -> JSONResponse:
         """Database health check endpoint."""
         try:
             mongodb_health = await mongodb.health_check()
@@ -71,13 +82,18 @@ def create_app() -> FastAPI:
 
     # API routes
     @app.get("/registrations/{registration_id}", response_model=RegistrationResponse)
-    async def get_registration(registration_id: str):
+    async def get_registration(registration_id: str) -> RegistrationResponse:
         """Get registration by ID."""
         try:
-            registration = await InsuranceAgent.get_registration(registration_id)
+            registration = await agent.get_registration(registration_id)
             if not registration:
                 raise HTTPException(status_code=404, detail="Registration not found")
             return registration
+        except RegistrationNotFoundError:
+            raise HTTPException(status_code=404, detail="Registration not found")
+        except RegistrationError as e:
+            logger.error(f"Registration error for {registration_id}: {e}")
+            raise HTTPException(status_code=500, detail="Registration service error")
         except HTTPException:
             raise
         except Exception as e:
@@ -85,17 +101,25 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail="Internal server error")
 
     @app.post("/chat", response_model=ChatResponse)
-    async def chat_with_agent(request: ChatRequest):
+    async def chat_with_agent(request: ChatRequest) -> ChatResponse:
         """Chat with the insurance agent."""
         try:
-            # Convert Pydantic models to dicts for agent
-            conversation_history = [item.model_dump() for item in request.conversation_history]
+            result = await agent.process_message(request.message, request.conversation_history)
 
-            result = await agent.process_message(request.message, conversation_history)
-
-            # Return as ChatResponse model
             return ChatResponse(**result)
 
+        except DataExtractionError as e:
+            logger.error(f"Data extraction error: {e}")
+            raise HTTPException(status_code=422, detail="Failed to extract data from message")
+        except DuplicateDetectionError as e:
+            logger.error(f"Duplicate detection error: {e}")
+            raise HTTPException(status_code=500, detail="Duplicate detection service error")
+        except ConversationError as e:
+            logger.error(f"Conversation error: {e}")
+            raise HTTPException(status_code=400, detail="Conversation flow error")
+        except ConfigurationError as e:
+            logger.error(f"Configuration error: {e}")
+            raise HTTPException(status_code=500, detail="Service configuration error")
         except HTTPException:
             raise
         except Exception as e:
@@ -111,8 +135,6 @@ app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-
-    from config.settings import settings
 
     uvicorn.run(
         "src.api.main:app",

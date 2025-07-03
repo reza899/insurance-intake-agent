@@ -14,15 +14,13 @@ langchain = "^0.3.26"
 langchain-openai = "^0.3.27"
 langchain-community = "^0.3.26"
 motor = "^3.7.1"
-dspy-ai = "^2.5.0"
 pydantic = "^2.11.7"
 pydantic-settings = "^2.6.0"
 python-dotenv = "^1.0.1"
-rapidfuzz = "^3.10.0"
 pyyaml = "^6.0.2"
 openai = "^1.93.0"
-transformers = "^4.53.0"
 cloudpickle = "^3.1.1"
+litellm = "^1.72.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
@@ -62,7 +60,6 @@ no_strict_optional = true
 # Per-module configurations for external libraries
 [[tool.mypy.overrides]]
 module = [
-    "dspy.*",
     "transformers.*",
     "gradio.*",
     "motor.*",
@@ -71,7 +68,6 @@ module = [
     "langchain_core.*",
     "langchain_openai.*",
     "langchain_community.*",
-    "rapidfuzz.*",
     "uvicorn.*"
 ]
 ignore_missing_imports = true
@@ -79,3 +75,14 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests", 
+    "e2e: marks tests as end-to-end tests"
+]
+
+[tool.poetry.scripts]
+test = "pytest -v"
+test-integration = "pytest tests/e2e-tests/test_integration.py -v"
+test-e2e = "pytest tests/e2e-tests/test_e2e_real.py -v"
